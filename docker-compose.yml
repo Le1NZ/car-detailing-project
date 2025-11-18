@@ -1,0 +1,207 @@
+version: '3.8'
+
+services:
+  # ========================================
+  # INFRASTRUCTURE SERVICES
+  # ========================================
+
+  # PostgreSQL Database
+  # Used by: user-service for persistent user data storage
+  # Credentials: detailing_user / detailing_pass
+  postgres-db:
+    image: postgres:14-alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: detailing_user
+      POSTGRES_PASSWORD: detailing_pass
+      POSTGRES_DB: detailing_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U detailing_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - detailing-network
+
+  # RabbitMQ Message Broker
+  # Used by: payment-service (publisher) and bonus-service (consumer)
+  # Management UI: http://localhost:15672 (guest/guest)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"   # AMQP protocol
+      - "15672:15672" # Management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - detailing-network
+
+  # ========================================
+  # MICROSERVICES
+  # ========================================
+
+  # 1. User Service (Port 8001)
+  # Manages user authentication and profiles with PostgreSQL database
+  # Pattern: Database-backed stateful service
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    container_name: user-service
+    ports:
+      - "8001:8001"
+    environment:
+      # PostgreSQL connection string using asyncpg driver
+      POSTGRES_URL: postgresql+asyncpg://detailing_user:detailing_pass@postgres-db:5432/detailing_db
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 2. Car Service (Port 8002)
+  # Manages vehicle information catalog with in-memory storage
+  # Pattern: Stateless service
+  car-service:
+    build:
+      context: ./car-service
+      dockerfile: Dockerfile
+    container_name: car-service
+    ports:
+      - "8002:8002"
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 3. Order Service (Port 8003)
+  # Manages detailing orders with HTTP communication to car-service
+  # Pattern: Synchronous HTTP inter-service communication
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    container_name: order-service
+    ports:
+      - "8003:8003"
+    environment:
+      # URL for synchronous HTTP calls to car-service for validation
+      CAR_SERVICE_URL: http://car-service:8002
+    depends_on:
+      - car-service
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 4. Cart Service (Port 8004)
+  # Manages shopping cart for services and products
+  # Pattern: Stateless in-memory storage
+  cart-service:
+    build:
+      context: ./cart-service
+      dockerfile: Dockerfile
+    container_name: cart-service
+    ports:
+      - "8004:8004"
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 5. Payment Service (Port 8005)
+  # Processes payments and publishes events to RabbitMQ
+  # Pattern: Asynchronous message publishing (Event Publisher)
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    container_name: payment-service
+    ports:
+      - "8005:8005"
+    environment:
+      # RabbitMQ connection string for publishing payment events
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 6. Bonus Service (Port 8006)
+  # Manages bonus points and consumes payment events from RabbitMQ
+  # Pattern: Asynchronous message consumption (Event Consumer)
+  bonus-service:
+    build:
+      context: ./bonus-service
+      dockerfile: Dockerfile
+    container_name: bonus-service
+    ports:
+      - "8006:8006"
+    environment:
+      # RabbitMQ connection string for consuming payment events
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 7. Fines Service (Port 8007)
+  # Manages vehicle fines checking and payment
+  # Pattern: Stateless service with external API simulation
+  fines-service:
+    build:
+      context: ./fines-service
+      dockerfile: Dockerfile
+    container_name: fines-service
+    ports:
+      - "8007:8007"
+    restart: on-failure
+    networks:
+      - detailing-network
+
+  # 8. Support Service (Port 8008)
+  # Manages customer support tickets and messages
+  # Pattern: Stateless in-memory ticket management
+  support-service:
+    build:
+      context: ./support-service
+      dockerfile: Dockerfile
+    container_name: support-service
+    ports:
+      - "8008:8008"
+    restart: on-failure
+    networks:
+      - detailing-network
+
+# ========================================
+# NETWORKS
+# ========================================
+networks:
+  # Custom bridge network for service isolation and inter-service communication
+  # All services communicate via service names (DNS resolution)
+  detailing-network:
+    driver: bridge
+
+# ========================================
+# VOLUMES
+# ========================================
+volumes:
+  # Persistent storage for PostgreSQL database
+  # Data survives container restarts and removals
+  postgres_data:
+    driver: local

@@ -1,0 +1,141 @@
+cart-service/
+│
+├── app/                                    # Основное приложение
+│   ├── __init__.py                         # Инициализация пакета
+│   ├── main.py                             # FastAPI приложение, точка входа
+│   ├── config.py                           # Конфигурация (порт, mock user_id)
+│   │
+│   ├── models/                             # Pydantic модели данных
+│   │   ├── __init__.py
+│   │   └── cart.py                         # CartItem, CartResponse, AddItemRequest
+│   │
+│   ├── repositories/                       # Слой данных
+│   │   ├── __init__.py
+│   │   └── local_cart_repo.py              # In-memory хранилище (Dict)
+│   │
+│   ├── services/                           # Бизнес-логика
+│   │   ├── __init__.py
+│   │   └── cart_service.py                 # CartService + CATALOG
+│   │
+│   └── endpoints/                          # HTTP обработчики
+│       ├── __init__.py
+│       └── cart.py                         # API endpoints (GET/POST/DELETE)
+│
+├── requirements.txt                        # Python зависимости
+├── Dockerfile                              # Docker образ
+├── README.md                               # Документация проекта
+├── API_EXAMPLES.md                         # Примеры использования API
+├── IMPLEMENTATION_REPORT.md                # Отчет о реализации
+├── STRUCTURE.txt                           # Структура проекта (этот файл)
+└── test_api.sh                             # Скрипт тестирования API
+
+АРХИТЕКТУРА:
+┌────────────────────────────────────────────────────────────────┐
+│                        HTTP REQUEST                             │
+└─────────────────────┬──────────────────────────────────────────┘
+                      │
+                      ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   ENDPOINTS LAYER                               │
+│  (app/endpoints/cart.py)                                        │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  GET /api/cart                                           │  │
+│  │  POST /api/cart/items                                    │  │
+│  │  DELETE /api/cart/items/{item_id}                        │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└─────────────────────┬──────────────────────────────────────────┘
+                      │ Dependency Injection
+                      ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   SERVICES LAYER                                │
+│  (app/services/cart_service.py)                                 │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  CartService.get_cart()                                  │  │
+│  │  CartService.add_item()    ─────► CATALOG               │  │
+│  │  CartService.remove_item()                               │  │
+│  │  CartService._calculate_total_price()                    │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└─────────────────────┬──────────────────────────────────────────┘
+                      │
+                      ▼
+┌────────────────────────────────────────────────────────────────┐
+│                 REPOSITORIES LAYER                              │
+│  (app/repositories/local_cart_repo.py)                          │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  LocalCartRepo                                           │  │
+│  │  ├── _storage: Dict[UUID, List[CartItem]]               │  │
+│  │  ├── get_cart(user_id)                                   │  │
+│  │  ├── add_item(user_id, item)                             │  │
+│  │  ├── remove_item(user_id, item_id)                       │  │
+│  │  └── clear_cart(user_id)                                 │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────┘
+
+DATA FLOW:
+1. HTTP Request → FastAPI Router
+2. Router → Endpoint Handler (валидация Pydantic)
+3. Endpoint → Service (бизнес-логика)
+4. Service → Repository (хранение данных)
+5. Repository → Service (результат)
+6. Service → Endpoint (response модель)
+7. Endpoint → HTTP Response
+
+CATALOG STRUCTURE:
+{
+  "svc_oil_change": {
+    "type": "service",
+    "name": "Замена масла",
+    "price": 2500.00
+  },
+  "prod_oil_filter": {
+    "type": "product",
+    "name": "Масляный фильтр",
+    "price": 1000.00
+  },
+  "svc_diagnostics": {
+    "type": "service",
+    "name": "Диагностика",
+    "price": 1500.00
+  }
+}
+
+STORAGE STRUCTURE:
+{
+  UUID("12345678-1234-5678-1234-567812345678"): [
+    CartItem(item_id="svc_oil_change", type="service", name="Замена масла", quantity=1, price=2500.0),
+    CartItem(item_id="prod_oil_filter", type="product", name="Масляный фильтр", quantity=2, price=1000.0)
+  ]
+}
+
+API ENDPOINTS:
+┌─────────┬─────────────────────────────┬─────────────────────────────┐
+│ Method  │ Path                        │ Description                 │
+├─────────┼─────────────────────────────┼─────────────────────────────┤
+│ GET     │ /api/cart                   │ Получить корзину            │
+│ POST    │ /api/cart/items             │ Добавить товар              │
+│ DELETE  │ /api/cart/items/{item_id}   │ Удалить товар               │
+│ GET     │ /health                     │ Health check                │
+│ GET     │ /                           │ Service info                │
+│ GET     │ /docs                       │ Swagger UI                  │
+│ GET     │ /redoc                      │ ReDoc                       │
+└─────────┴─────────────────────────────┴─────────────────────────────┘
+
+TECHNOLOGY STACK:
+- Python 3.11
+- FastAPI 0.104.1
+- Uvicorn 0.24.0 [standard]
+- Pydantic 2.5.0
+- Docker
+
+FEATURES:
+✓ Трехслойная архитектура
+✓ In-memory хранилище
+✓ Dependency Injection
+✓ Type hints
+✓ Pydantic валидация
+✓ Автоматическая документация (Swagger/ReDoc)
+✓ Health check endpoint
+✓ Логирование
+✓ Обработка ошибок (404, 400, 422)
+✓ Docker support
+✓ Тестовый скрипт
