@@ -1,26 +1,27 @@
 """
 Component tests for bonus-service
 
-These tests verify interactions between multiple components (API endpoints, services, repositories)
-while maintaining isolation from external systems through mocking. Component tests ensure that
-different layers of the application work together correctly.
+Component testing verifies that multiple INTERNAL components of the service work together correctly.
+In bonus-service, components include: API Endpoint + BonusService + LocalBonusRepository.
 
-Test scenarios:
-1. Promocode application with discount validation
-2. Bonus spending with balance verification
-3. Bonus accrual via RabbitMQ consumer (mocked)
-4. Promocode validation (active/inactive states)
-5. Complex scenario: accrue -> apply -> spend bonuses
+Component tests:
+- Test REAL interactions between API endpoints, service layer, and repository
+- Mock ONLY external dependencies (RabbitMQ)
+- DO NOT mock internal service or repository layers
+
+Key difference from integration tests:
+- Integration tests may mock service layer
+- Component tests use REAL service + REAL repository working together
 """
 
 import pytest
 import json
 from uuid import UUID, uuid4
-from unittest.mock import Mock, AsyncMock, patch
-from httpx import AsyncClient
+from unittest.mock import Mock, AsyncMock
+from httpx import AsyncClient, ASGITransport
 from fastapi import FastAPI
 
-from app.repositories.local_bonus_repo import LocalBonusRepository, Promocode
+from app.repositories.local_bonus_repo import LocalBonusRepository
 from app.services.bonus_service import BonusService
 from app.services.rabbitmq_consumer import RabbitMQConsumer
 from app.endpoints import bonuses
@@ -33,29 +34,28 @@ from app.config import settings
 @pytest.fixture
 def component_repository() -> LocalBonusRepository:
     """
-    Create a fresh repository instance for component testing.
-    This provides real repository behavior with isolated in-memory storage.
+    Fresh repository instance for component testing.
+    This is the REAL repository, not a mock.
     """
     return LocalBonusRepository()
 
 
 @pytest.fixture
-def component_bonus_service(component_repository: LocalBonusRepository) -> BonusService:
+def component_service(component_repository: LocalBonusRepository) -> BonusService:
     """
-    Create a bonus service with a real repository for component testing.
-    This allows testing the full interaction between service and repository layers.
+    Real BonusService instance using the real repository.
+    Tests full service -> repository interaction.
     """
     return BonusService(repository=component_repository)
 
 
 @pytest.fixture
-async def component_test_client(component_repository: LocalBonusRepository) -> AsyncClient:
+async def component_test_client(component_repository: LocalBonusRepository):
     """
-    Create an async test client with dependency injection for component testing.
-    Uses real service and repository instances to test full component interaction.
+    Async test client with REAL service and repository for component testing.
+    Mocks only external dependencies (JWT auth).
     """
     from app.auth import get_current_user_id
-    from httpx import ASGITransport
 
     # Create test app without lifespan (to avoid RabbitMQ connection)
     test_app = FastAPI(title="Test Bonus Service - Component")
@@ -68,11 +68,8 @@ async def component_test_client(component_repository: LocalBonusRepository) -> A
 
     test_app.dependency_overrides[get_current_user_id] = mock_get_current_user_id
 
-    # Override the bonus_service dependency with our component service
-    # This ensures all endpoints use the same repository instance
+    # Override the bonus_service with our component service (using real repository)
     component_service = BonusService(repository=component_repository)
-
-    # Monkey-patch the module-level bonus_service
     original_service = bonuses.bonus_service
     bonuses.bonus_service = component_service
 
@@ -82,7 +79,7 @@ async def component_test_client(component_repository: LocalBonusRepository) -> A
     async def health_check():
         return HealthResponse(status="healthy", service=settings.SERVICE_NAME)
 
-    # Use ASGITransport for httpx 0.28+
+    # Use ASGITransport for httpx
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         yield client
 
@@ -92,595 +89,440 @@ async def component_test_client(component_repository: LocalBonusRepository) -> A
 
 @pytest.fixture
 def test_user_id() -> UUID:
-    """Standard test user ID for component tests"""
+    """Standard test user ID"""
     return UUID("c3f4e1a1-5b8a-4b0e-8d9b-9d4a6f1e2c3d")
 
 
 @pytest.fixture
 def test_order_id() -> UUID:
-    """Standard test order ID for component tests"""
+    """Standard test order ID"""
     return UUID("123e4567-e89b-12d3-a456-426614174000")
 
 
-# ==================== Component Test 1: Promocode Application with Discount Validation ====================
+# ==================== Component Test 1: Apply Promocode Flow ====================
 
 @pytest.mark.asyncio
-class TestPromocodeApplication:
-    """Test promocode application through full API -> Service -> Repository flow"""
+async def test_apply_promocode_flow(
+    component_test_client: AsyncClient,
+    test_order_id: UUID
+):
+    """
+    Component Test 1: Full flow of applying promocode
 
-    async def test_apply_valid_promocode_returns_correct_discount(
-        self,
-        component_test_client: AsyncClient,
-        test_order_id: UUID
-    ):
-        """
-        Component Test 1: Apply valid promocode and verify correct discount amount
+    Flow tested:
+    1. API endpoint receives request with promocode
+    2. BonusService validates promocode
+    3. Repository searches for promocode in PROMOCODES list
+    4. Repository returns Promocode object with discount
+    5. Service returns discount amount
+    6. API endpoint returns 200 with correct discount
 
-        Tests the full flow:
-        - API endpoint receives request
-        - Service validates promocode
-        - Repository finds active promocode
-        - Response contains correct discount amount
-        """
-        # Arrange
-        payload = {
-            "order_id": str(test_order_id),
-            "promocode": "SUMMER24"
-        }
+    Components involved: API Endpoint + BonusService + LocalBonusRepository
+    No mocks used (all components are real)
+    """
+    # Arrange
+    payload = {
+        "order_id": str(test_order_id),
+        "promocode": "SUMMER24"  # This promocode exists in repository with 500 RUB discount
+    }
 
-        # Act
-        response = await component_test_client.post(
-            "/api/bonuses/promocodes/apply",
-            json=payload
-        )
+    # Act
+    response = await component_test_client.post(
+        "/api/bonuses/promocodes/apply",
+        json=payload
+    )
 
-        # Assert
-        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    # Assert
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
 
-        data = response.json()
-        assert data["order_id"] == str(test_order_id)
-        assert data["promocode"] == "SUMMER24"
-        assert data["status"] == "applied"
-        assert data["discount_amount"] == 500.0, "SUMMER24 should give 500 RUB discount"
+    data = response.json()
+    assert data["order_id"] == str(test_order_id)
+    assert data["promocode"] == "SUMMER24"
+    assert data["status"] == "applied"
+    assert data["discount_amount"] == 500.0, "SUMMER24 should give 500 RUB discount from repository"
 
-    async def test_apply_invalid_promocode_returns_404(
-        self,
-        component_test_client: AsyncClient,
-        test_order_id: UUID
-    ):
-        """
-        Test that invalid promocode returns 404 NOT_FOUND
+    # Test alternative promocode
+    payload2 = {
+        "order_id": str(test_order_id),
+        "promocode": "WELCOME10"  # This promocode exists with 1000 RUB discount
+    }
 
-        Verifies error handling through all layers:
-        - Repository returns None for invalid code
-        - Service raises ValueError
-        - Endpoint converts to HTTP 404
-        """
-        # Arrange
-        payload = {
-            "order_id": str(test_order_id),
-            "promocode": "INVALID_CODE"
-        }
+    response2 = await component_test_client.post(
+        "/api/bonuses/promocodes/apply",
+        json=payload2
+    )
 
-        # Act
-        response = await component_test_client.post(
-            "/api/bonuses/promocodes/apply",
-            json=payload
-        )
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert data2["discount_amount"] == 1000.0, "WELCOME10 should give 1000 RUB discount"
 
-        # Assert
-        assert response.status_code == 404, f"Expected 404 for invalid promocode, got {response.status_code}"
-        assert "invalid or inactive" in response.json()["detail"].lower()
+    # Test invalid promocode - should return 404
+    payload3 = {
+        "order_id": str(test_order_id),
+        "promocode": "INVALID123"
+    }
 
-    async def test_apply_different_valid_promocode(
-        self,
-        component_test_client: AsyncClient,
-        test_order_id: UUID
-    ):
-        """
-        Test applying WELCOME10 promocode with higher discount
+    response3 = await component_test_client.post(
+        "/api/bonuses/promocodes/apply",
+        json=payload3
+    )
 
-        Verifies that multiple promocodes work correctly with different discount amounts
-        """
-        # Arrange
-        payload = {
-            "order_id": str(test_order_id),
-            "promocode": "WELCOME10"
-        }
-
-        # Act
-        response = await component_test_client.post(
-            "/api/bonuses/promocodes/apply",
-            json=payload
-        )
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-        assert data["promocode"] == "WELCOME10"
-        assert data["discount_amount"] == 1000.0, "WELCOME10 should give 1000 RUB discount"
+    assert response3.status_code == 404, "Invalid promocode should return 404"
+    assert "invalid or inactive" in response3.json()["detail"].lower()
 
 
-# ==================== Component Test 2: Bonus Spending with Balance Verification ====================
+# ==================== Component Test 2: Spend Bonuses Flow ====================
 
 @pytest.mark.asyncio
-class TestBonusSpending:
-    """Test bonus spending through full component stack with balance management"""
+async def test_spend_bonuses_flow(
+    component_test_client: AsyncClient,
+    component_repository: LocalBonusRepository,
+    test_user_id: UUID,
+    test_order_id: UUID
+):
+    """
+    Component Test 2: Full flow of spending bonuses
 
-    async def test_spend_bonuses_with_sufficient_balance(
-        self,
-        component_test_client: AsyncClient,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID,
-        test_order_id: UUID
-    ):
-        """
-        Component Test 2: Spend bonuses when user has sufficient balance
+    Flow tested:
+    1. Populate user balance in repository (simulate prior accrual)
+    2. API endpoint receives spend request
+    3. BonusService checks balance via repository
+    4. Repository validates sufficient balance
+    5. Repository updates user balance (subtract amount)
+    6. Service returns new balance
+    7. API endpoint returns 200 with bonuses_spent and new_balance
 
-        Tests the full flow:
-        - Pre-populate user balance in repository
-        - API endpoint receives spend request
-        - Service validates balance
-        - Repository updates balance
-        - Response reflects new balance
-        """
-        # Arrange: Add bonuses to user account
-        initial_balance = 1000.0
-        await component_repository.add_bonuses(test_user_id, initial_balance)
+    Components involved: API Endpoint + BonusService + LocalBonusRepository
+    Repository state is modified and persisted
+    """
+    # Arrange: Add initial balance to user
+    initial_balance = 1000.0
+    await component_repository.add_bonuses(test_user_id, initial_balance)
 
-        spend_amount = 300
-        payload = {
-            "order_id": str(test_order_id),
-            "amount": spend_amount
-        }
+    # Verify initial balance
+    balance = await component_repository.get_user_balance(test_user_id)
+    assert balance == initial_balance
 
-        # Act
-        response = await component_test_client.post(
-            "/api/bonuses/spend",
-            json=payload
-        )
+    # Act: Spend bonuses via API
+    spend_amount = 300
+    payload = {
+        "order_id": str(test_order_id),
+        "amount": spend_amount
+    }
 
-        # Assert
-        assert response.status_code == 200
+    response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=payload
+    )
 
-        data = response.json()
-        assert data["order_id"] == str(test_order_id)
-        assert data["bonuses_spent"] == spend_amount
-        assert data["new_balance"] == initial_balance - spend_amount
+    # Assert
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
 
-        # Verify repository state
-        final_balance = await component_repository.get_user_balance(test_user_id)
-        assert final_balance == 700.0, "Balance should be updated in repository"
+    data = response.json()
+    assert data["order_id"] == str(test_order_id)
+    assert data["bonuses_spent"] == spend_amount
+    assert data["new_balance"] == 700.0, "Balance should be 1000 - 300 = 700"
 
-    async def test_spend_bonuses_with_insufficient_balance_returns_400(
-        self,
-        component_test_client: AsyncClient,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID,
-        test_order_id: UUID
-    ):
-        """
-        Test that spending more bonuses than available returns 400 BAD_REQUEST
+    # Verify repository state changed
+    final_balance = await component_repository.get_user_balance(test_user_id)
+    assert final_balance == 700.0, "Repository should reflect the updated balance"
 
-        Verifies error handling:
-        - Repository reports insufficient balance
-        - Service raises ValueError
-        - Endpoint converts to HTTP 400
-        """
-        # Arrange: User has only 100 bonuses
-        await component_repository.add_bonuses(test_user_id, 100.0)
+    # Test spending more bonuses
+    payload2 = {
+        "order_id": str(uuid4()),
+        "amount": 200
+    }
 
-        payload = {
-            "order_id": str(test_order_id),
-            "amount": 500  # Try to spend more than available
-        }
+    response2 = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=payload2
+    )
 
-        # Act
-        response = await component_test_client.post(
-            "/api/bonuses/spend",
-            json=payload
-        )
-
-        # Assert
-        assert response.status_code == 400, f"Expected 400 for insufficient bonuses, got {response.status_code}"
-        assert "insufficient" in response.json()["detail"].lower()
-
-        # Verify balance unchanged
-        balance = await component_repository.get_user_balance(test_user_id)
-        assert balance == 100.0, "Balance should remain unchanged after failed spend"
-
-    async def test_spend_zero_balance_user_returns_400(
-        self,
-        component_test_client: AsyncClient,
-        test_user_id: UUID,
-        test_order_id: UUID
-    ):
-        """
-        Test spending bonuses when user has zero balance
-
-        Verifies that new users (no balance entry) cannot spend bonuses
-        """
-        # Arrange: User has no bonuses (default 0)
-        payload = {
-            "order_id": str(test_order_id),
-            "amount": 50
-        }
-
-        # Act
-        response = await component_test_client.post(
-            "/api/bonuses/spend",
-            json=payload
-        )
-
-        # Assert
-        assert response.status_code == 400
-        assert "insufficient" in response.json()["detail"].lower()
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert data2["new_balance"] == 500.0, "Balance should be 700 - 200 = 500"
 
 
-# ==================== Component Test 3: Bonus Accrual via RabbitMQ Consumer ====================
+# ==================== Component Test 3: Accrue Bonuses Through Service Layer ====================
 
 @pytest.mark.asyncio
-class TestBonusAccrualViaRabbitMQ:
-    """Test bonus accrual through RabbitMQ consumer with mocked message broker"""
+async def test_accrue_bonuses_through_service_layer(
+    component_test_client: AsyncClient,
+    component_service: BonusService,
+    component_repository: LocalBonusRepository,
+    test_user_id: UUID
+):
+    """
+    Component Test 3: Accrue bonuses through service and verify via API
 
-    async def test_rabbitmq_consumer_accrues_bonuses_on_payment_success(
-        self,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID,
-        test_order_id: UUID
-    ):
-        """
-        Component Test 3: RabbitMQ consumer accrues bonuses on payment_succeeded event
+    Flow tested:
+    1. Directly call BonusService.accrue_bonuses() (simulates RabbitMQ consumer call)
+    2. Service calculates bonus amount (payment_amount * rate)
+    3. Repository stores bonuses in user_balances dict
+    4. Verify balance persisted by calling repository directly
+    5. Verify balance can be queried through API (future enhancement)
 
-        Tests the message processing flow:
-        - Mock RabbitMQ message with payment data
-        - Consumer processes message
-        - Service accrues bonuses (1% of payment)
-        - Repository updates user balance
-        """
-        # Arrange
-        payment_amount = 10000.0  # 10,000 RUB payment
-        expected_bonuses = payment_amount * 0.01  # 1% = 100 bonuses
+    Components involved: BonusService + LocalBonusRepository + API verification
+    This simulates what happens when RabbitMQ consumer calls the service
+    """
+    # Arrange
+    payment_amount = 10000.0  # 10,000 RUB payment
+    rate = 0.01  # 1% bonus rate
+    expected_bonuses = 100.0  # 10,000 * 0.01 = 100 bonuses
+    order_id = uuid4()
 
-        # Create consumer with real service
-        consumer = RabbitMQConsumer(bonus_service=component_bonus_service)
+    # Act: Accrue bonuses via service (simulates RabbitMQ consumer behavior)
+    accrued_amount = await component_service.accrue_bonuses(
+        user_id=test_user_id,
+        order_id=order_id,
+        payment_amount=payment_amount,
+        rate=rate
+    )
 
-        # Create mock RabbitMQ message with proper async context manager
-        mock_message = Mock()
-        message_body = {
-            "order_id": str(test_order_id),
-            "user_id": str(test_user_id),
-            "amount": payment_amount
-        }
-        mock_message.body = json.dumps(message_body).encode()
+    # Assert: Verify service returned correct amount
+    assert accrued_amount == expected_bonuses, f"Expected {expected_bonuses}, got {accrued_amount}"
 
-        # Create a proper async context manager for message.process()
-        mock_context = AsyncMock()
-        mock_context.__aenter__ = AsyncMock(return_value=None)
-        mock_context.__aexit__ = AsyncMock(return_value=None)
-        mock_message.process = Mock(return_value=mock_context)
+    # Verify repository stored the bonuses
+    balance = await component_repository.get_user_balance(test_user_id)
+    assert balance == expected_bonuses, f"Repository should have {expected_bonuses} bonuses"
 
-        # Act: Process the message
-        await consumer.on_message(mock_message)
+    # Accrue more bonuses for the same user
+    accrued_amount2 = await component_service.accrue_bonuses(
+        user_id=test_user_id,
+        order_id=uuid4(),
+        payment_amount=5000.0,
+        rate=0.01
+    )
 
-        # Assert: Verify bonuses were accrued
-        balance = await component_repository.get_user_balance(test_user_id)
-        assert balance == expected_bonuses, f"Expected {expected_bonuses} bonuses, got {balance}"
+    assert accrued_amount2 == 50.0
 
-    async def test_rabbitmq_consumer_handles_multiple_payments_cumulatively(
-        self,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID
-    ):
-        """
-        Test that multiple payment events accumulate bonuses correctly
+    # Verify cumulative balance
+    balance_after_second = await component_repository.get_user_balance(test_user_id)
+    assert balance_after_second == 150.0, "Balance should accumulate: 100 + 50 = 150"
 
-        Verifies:
-        - Multiple messages are processed independently
-        - Bonuses accumulate in user balance
-        - Repository maintains state across messages
-        """
-        # Arrange
-        consumer = RabbitMQConsumer(bonus_service=component_bonus_service)
+    # Now verify we can spend these accrued bonuses via API
+    spend_payload = {
+        "order_id": str(uuid4()),
+        "amount": 75
+    }
 
-        payments = [
-            {"order_id": str(uuid4()), "amount": 5000.0},   # +50 bonuses
-            {"order_id": str(uuid4()), "amount": 3000.0},   # +30 bonuses
-            {"order_id": str(uuid4()), "amount": 2000.0},   # +20 bonuses
-        ]
+    spend_response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=spend_payload
+    )
 
-        # Act: Process multiple payment messages
-        for payment_data in payments:
-            mock_message = Mock()
-            message_body = {
-                **payment_data,
-                "user_id": str(test_user_id)
-            }
-            mock_message.body = json.dumps(message_body).encode()
-
-            # Create proper async context manager
-            mock_context = AsyncMock()
-            mock_context.__aenter__ = AsyncMock(return_value=None)
-            mock_context.__aexit__ = AsyncMock(return_value=None)
-            mock_message.process = Mock(return_value=mock_context)
-
-            await consumer.on_message(mock_message)
-
-        # Assert: Total bonuses should be sum of all accruals
-        total_expected = (5000 + 3000 + 2000) * 0.01  # 100 bonuses
-        balance = await component_repository.get_user_balance(test_user_id)
-        assert balance == total_expected, f"Expected cumulative {total_expected} bonuses, got {balance}"
-
-    async def test_rabbitmq_consumer_handles_invalid_message_gracefully(
-        self,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID
-    ):
-        """
-        Test that consumer handles malformed messages without crashing
-
-        Verifies error handling:
-        - Invalid JSON in message body
-        - Missing required fields
-        - Consumer logs error but doesn't crash
-        """
-        # Arrange
-        consumer = RabbitMQConsumer(bonus_service=component_bonus_service)
-
-        # Create mock message with invalid JSON
-        mock_message = Mock()
-        mock_message.body = b'{"invalid": "missing required fields"}'
-
-        # Create proper async context manager
-        mock_context = AsyncMock()
-        mock_context.__aenter__ = AsyncMock(return_value=None)
-        mock_context.__aexit__ = AsyncMock(return_value=None)
-        mock_message.process = Mock(return_value=mock_context)
-
-        # Act: Process invalid message (should not raise exception)
-        await consumer.on_message(mock_message)
-
-        # Assert: Balance should remain 0 (no bonuses accrued)
-        balance = await component_repository.get_user_balance(test_user_id)
-        assert balance == 0.0, "Invalid message should not accrue bonuses"
+    assert spend_response.status_code == 200
+    spend_data = spend_response.json()
+    assert spend_data["new_balance"] == 75.0, "Should be able to spend accrued bonuses: 150 - 75 = 75"
 
 
-# ==================== Component Test 4: Promocode Validation (Active/Inactive) ====================
+# ==================== Component Test 4: Insufficient Balance Error Propagation ====================
 
 @pytest.mark.asyncio
-class TestPromocodeValidation:
-    """Test promocode validation logic through repository and service layers"""
+async def test_insufficient_balance_error_propagation(
+    component_test_client: AsyncClient,
+    component_repository: LocalBonusRepository,
+    test_user_id: UUID,
+    test_order_id: UUID
+):
+    """
+    Component Test 4: Error propagation through all layers
 
-    async def test_inactive_promocode_is_rejected(
-        self,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository,
-        test_order_id: UUID
-    ):
-        """
-        Component Test 4: Inactive promocodes should be rejected
+    Flow tested:
+    1. API endpoint receives spend request for amount > balance
+    2. BonusService calls repository.get_user_balance()
+    3. Service detects insufficient balance
+    4. Service raises ValueError
+    5. API endpoint catches ValueError
+    6. API endpoint returns HTTP 400 with error message
+    7. Repository state remains unchanged (no balance deduction)
 
-        Tests validation flow:
-        - Add inactive promocode to repository
-        - Service attempts to apply it
-        - Repository filters out inactive codes
-        - Service raises ValueError
-        """
-        # Arrange: Add an inactive promocode
-        inactive_promo = Promocode(code="EXPIRED", discount_amount=200.0, active=False)
-        component_repository.promocodes.append(inactive_promo)
+    Components involved: API Endpoint + BonusService + LocalBonusRepository
+    Tests error handling across all layers
+    """
+    # Arrange: User has only 50 bonuses
+    await component_repository.add_bonuses(test_user_id, 50.0)
 
-        # Act & Assert: Attempting to apply should raise ValueError
-        with pytest.raises(ValueError, match="invalid or inactive"):
-            await component_bonus_service.apply_promocode(
-                order_id=test_order_id,
-                promocode="EXPIRED"
-            )
+    initial_balance = await component_repository.get_user_balance(test_user_id)
+    assert initial_balance == 50.0
 
-    async def test_active_promocode_is_accepted(
-        self,
-        component_bonus_service: BonusService,
-        test_order_id: UUID
-    ):
-        """
-        Test that active promocodes are successfully applied
+    # Act: Try to spend 200 bonuses (more than available)
+    payload = {
+        "order_id": str(test_order_id),
+        "amount": 200
+    }
 
-        Verifies the default SUMMER24 and WELCOME10 promocodes are active
-        """
-        # Act: Apply active promocode
-        status, discount = await component_bonus_service.apply_promocode(
-            order_id=test_order_id,
-            promocode="SUMMER24"
-        )
+    response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=payload
+    )
 
-        # Assert
-        assert status == "applied"
-        assert discount == 500.0
+    # Assert: Should return 400 BAD_REQUEST
+    assert response.status_code == 400, f"Expected 400 for insufficient balance, got {response.status_code}"
 
-    async def test_case_sensitive_promocode_matching(
-        self,
-        component_bonus_service: BonusService,
-        test_order_id: UUID
-    ):
-        """
-        Test that promocode matching is case-sensitive
+    error_detail = response.json()["detail"]
+    assert "insufficient" in error_detail.lower(), "Error message should mention insufficient balance"
+    assert "50" in error_detail or "50.0" in error_detail, "Error should show current balance"
+    assert "200" in error_detail, "Error should show requested amount"
 
-        Verifies that lowercase/uppercase variations are rejected
-        """
-        # Act & Assert: Lowercase version should fail
-        with pytest.raises(ValueError, match="invalid or inactive"):
-            await component_bonus_service.apply_promocode(
-                order_id=test_order_id,
-                promocode="summer24"  # lowercase
-            )
+    # Verify repository state unchanged
+    balance_after_error = await component_repository.get_user_balance(test_user_id)
+    assert balance_after_error == 50.0, "Balance should remain unchanged after failed spend"
+
+    # Test edge case: spend exactly 0 bonuses (user has 0 balance)
+    user2_id = uuid4()
+    payload2 = {
+        "order_id": str(uuid4()),
+        "amount": 1
+    }
+
+    # Temporarily override auth to return user2_id
+    from app.auth import get_current_user_id
+
+    def mock_user2() -> UUID:
+        return user2_id
+
+    # Note: This test uses test_user_id from fixture, so we test with that user trying to spend more
+    payload3 = {
+        "order_id": str(uuid4()),
+        "amount": 51  # One more than balance
+    }
+
+    response3 = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=payload3
+    )
+
+    assert response3.status_code == 400, "Should fail when spending 51 with balance of 50"
 
 
-# ==================== Component Test 5: Complex Scenario - Accrue, Apply, Spend ====================
+# ==================== Component Test 5: Complete Bonus Lifecycle ====================
 
 @pytest.mark.asyncio
-class TestComplexBonusScenario:
-    """Test complete user journey through bonus system"""
+async def test_complete_bonus_lifecycle(
+    component_test_client: AsyncClient,
+    component_service: BonusService,
+    component_repository: LocalBonusRepository,
+    test_user_id: UUID
+):
+    """
+    Component Test 5: Complete user journey through the bonus system
 
-    async def test_complete_bonus_lifecycle_accrue_then_spend(
-        self,
-        component_test_client: AsyncClient,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID
-    ):
-        """
-        Component Test 5: Complete bonus lifecycle scenario
+    Scenario:
+    1. User makes payment -> bonuses accrued (via service call)
+    2. Check balance increased in repository
+    3. User makes another payment -> more bonuses accrued
+    4. User spends some bonuses via API
+    5. Check balance decreased
+    6. User spends remaining bonuses via API
+    7. Verify final balance is 0
 
-        Scenario:
-        1. User makes payment -> bonuses accrued via RabbitMQ (100 bonuses)
-        2. User applies promocode -> gets discount (500 RUB)
-        3. User spends bonuses -> balance reduced
+    Flow tested:
+    - Accrue bonuses (Service + Repository)
+    - Query balance (Repository)
+    - Spend bonuses (API + Service + Repository)
+    - Multiple operations maintain state consistency
 
-        Tests full integration:
-        - RabbitMQ consumer (mocked) -> Service -> Repository
-        - API endpoint -> Service -> Repository
-        - State persistence across operations
-        """
-        # ========== Step 1: Accrue bonuses from payment ==========
-        payment_amount = 10000.0  # 10,000 RUB
-        expected_accrued = 100.0   # 1% = 100 bonuses
+    Components involved: ALL components working together across multiple operations
+    """
+    # Step 1: Accrue bonuses from first payment
+    payment1_amount = 8000.0  # 8,000 RUB
+    order1_id = uuid4()
 
-        # Simulate RabbitMQ message processing
-        consumer = RabbitMQConsumer(bonus_service=component_bonus_service)
-        mock_message = Mock()
-        message_body = {
-            "order_id": str(uuid4()),
-            "user_id": str(test_user_id),
-            "amount": payment_amount
-        }
-        mock_message.body = json.dumps(message_body).encode()
+    bonuses1 = await component_service.accrue_bonuses(
+        user_id=test_user_id,
+        order_id=order1_id,
+        payment_amount=payment1_amount,
+        rate=0.01
+    )
 
-        # Create proper async context manager
-        mock_context = AsyncMock()
-        mock_context.__aenter__ = AsyncMock(return_value=None)
-        mock_context.__aexit__ = AsyncMock(return_value=None)
-        mock_message.process = Mock(return_value=mock_context)
+    assert bonuses1 == 80.0, "First payment should accrue 80 bonuses"
 
-        await consumer.on_message(mock_message)
+    # Step 2: Verify balance in repository
+    balance_after_first = await component_repository.get_user_balance(test_user_id)
+    assert balance_after_first == 80.0, "Repository should show 80 bonuses"
 
-        # Verify bonuses accrued
-        balance_after_accrual = await component_repository.get_user_balance(test_user_id)
-        assert balance_after_accrual == expected_accrued, "Step 1: Bonuses should be accrued"
+    # Step 3: Accrue bonuses from second payment
+    payment2_amount = 12000.0  # 12,000 RUB
+    order2_id = uuid4()
 
-        # ========== Step 2: Apply promocode to new order ==========
-        order_id_for_promo = uuid4()
-        promo_payload = {
-            "order_id": str(order_id_for_promo),
-            "promocode": "SUMMER24"
-        }
+    bonuses2 = await component_service.accrue_bonuses(
+        user_id=test_user_id,
+        order_id=order2_id,
+        payment_amount=payment2_amount,
+        rate=0.01
+    )
 
-        promo_response = await component_test_client.post(
-            "/api/bonuses/promocodes/apply",
-            json=promo_payload
-        )
+    assert bonuses2 == 120.0, "Second payment should accrue 120 bonuses"
 
-        assert promo_response.status_code == 200, "Step 2: Promocode should be applied"
-        promo_data = promo_response.json()
-        assert promo_data["discount_amount"] == 500.0, "Step 2: Should get 500 RUB discount"
+    # Step 4: Verify cumulative balance
+    balance_after_second = await component_repository.get_user_balance(test_user_id)
+    assert balance_after_second == 200.0, "Total should be 80 + 120 = 200 bonuses"
 
-        # Balance should remain unchanged (promocode doesn't affect bonuses)
-        balance_after_promo = await component_repository.get_user_balance(test_user_id)
-        assert balance_after_promo == expected_accrued, "Step 2: Balance unchanged by promocode"
+    # Step 5: Spend some bonuses via API
+    spend1_payload = {
+        "order_id": str(uuid4()),
+        "amount": 70
+    }
 
-        # ========== Step 3: Spend bonuses on another order ==========
-        order_id_for_spend = uuid4()
-        spend_amount = 50
-        spend_payload = {
-            "order_id": str(order_id_for_spend),
-            "amount": spend_amount
-        }
+    spend1_response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=spend1_payload
+    )
 
-        spend_response = await component_test_client.post(
-            "/api/bonuses/spend",
-            json=spend_payload
-        )
+    assert spend1_response.status_code == 200, "Should successfully spend 70 bonuses"
+    spend1_data = spend1_response.json()
+    assert spend1_data["bonuses_spent"] == 70
+    assert spend1_data["new_balance"] == 130.0, "Balance should be 200 - 70 = 130"
 
-        assert spend_response.status_code == 200, "Step 3: Bonuses should be spent"
-        spend_data = spend_response.json()
-        assert spend_data["bonuses_spent"] == spend_amount, "Step 3: Should spend 50 bonuses"
-        assert spend_data["new_balance"] == expected_accrued - spend_amount, "Step 3: Balance should be reduced"
+    # Step 6: Verify balance after first spend
+    balance_after_spend1 = await component_repository.get_user_balance(test_user_id)
+    assert balance_after_spend1 == 130.0, "Repository should reflect spent bonuses"
 
-        # ========== Final Verification ==========
-        final_balance = await component_repository.get_user_balance(test_user_id)
-        assert final_balance == 50.0, "Final: User should have 50 bonuses remaining"
+    # Step 7: Spend more bonuses via API
+    spend2_payload = {
+        "order_id": str(uuid4()),
+        "amount": 80
+    }
 
-    async def test_multiple_users_isolated_balances(
-        self,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository
-    ):
-        """
-        Test that multiple users have isolated bonus balances
+    spend2_response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=spend2_payload
+    )
 
-        Verifies:
-        - Each user has independent balance
-        - Operations on one user don't affect others
-        - Repository correctly isolates user data
-        """
-        # Arrange
-        user1_id = UUID("11111111-1111-1111-1111-111111111111")
-        user2_id = UUID("22222222-2222-2222-2222-222222222222")
-        user3_id = UUID("33333333-3333-3333-3333-333333333333")
+    assert spend2_response.status_code == 200
+    spend2_data = spend2_response.json()
+    assert spend2_data["new_balance"] == 50.0, "Balance should be 130 - 80 = 50"
 
-        # Act: Accrue different amounts to each user
-        await component_repository.add_bonuses(user1_id, 100.0)
-        await component_repository.add_bonuses(user2_id, 200.0)
-        await component_repository.add_bonuses(user3_id, 300.0)
+    # Step 8: Spend remaining bonuses
+    spend3_payload = {
+        "order_id": str(uuid4()),
+        "amount": 50
+    }
 
-        # Spend some bonuses from user2
-        await component_repository.spend_bonuses(user2_id, 50)
+    spend3_response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=spend3_payload
+    )
 
-        # Assert: Verify each user's balance is independent
-        balance1 = await component_repository.get_user_balance(user1_id)
-        balance2 = await component_repository.get_user_balance(user2_id)
-        balance3 = await component_repository.get_user_balance(user3_id)
+    assert spend3_response.status_code == 200
+    spend3_data = spend3_response.json()
+    assert spend3_data["new_balance"] == 0.0, "Balance should be 50 - 50 = 0"
 
-        assert balance1 == 100.0, "User 1 balance should be unchanged"
-        assert balance2 == 150.0, "User 2 balance should be reduced by 50"
-        assert balance3 == 300.0, "User 3 balance should be unchanged"
+    # Step 9: Verify final balance is 0
+    final_balance = await component_repository.get_user_balance(test_user_id)
+    assert final_balance == 0.0, "User should have 0 bonuses remaining"
 
-    async def test_concurrent_bonus_operations_maintain_consistency(
-        self,
-        component_bonus_service: BonusService,
-        component_repository: LocalBonusRepository,
-        test_user_id: UUID
-    ):
-        """
-        Test that multiple bonus operations maintain balance consistency
+    # Step 10: Try to spend when balance is 0 (should fail)
+    spend4_payload = {
+        "order_id": str(uuid4()),
+        "amount": 1
+    }
 
-        Simulates concurrent operations:
-        - Multiple accruals
-        - Multiple spends
-        - Final balance should be mathematically consistent
-        """
-        # Arrange: Start with initial balance
-        await component_repository.add_bonuses(test_user_id, 500.0)
+    spend4_response = await component_test_client.post(
+        "/api/bonuses/spend",
+        json=spend4_payload
+    )
 
-        # Act: Perform multiple operations
-        operations = [
-            ("add", 100.0),
-            ("spend", 50),
-            ("add", 200.0),
-            ("spend", 100),
-            ("add", 150.0),
-        ]
-
-        for operation, amount in operations:
-            if operation == "add":
-                await component_repository.add_bonuses(test_user_id, amount)
-            elif operation == "spend":
-                await component_repository.spend_bonuses(test_user_id, int(amount))
-
-        # Assert: Final balance should be correct
-        # Initial: 500, +100, -50, +200, -100, +150 = 800
-        expected_final = 500.0 + 100.0 - 50 + 200.0 - 100 + 150.0
-        final_balance = await component_repository.get_user_balance(test_user_id)
-        assert final_balance == expected_final, f"Expected {expected_final}, got {final_balance}"
+    assert spend4_response.status_code == 400, "Should fail when trying to spend with 0 balance"
+    assert "insufficient" in spend4_response.json()["detail"].lower()

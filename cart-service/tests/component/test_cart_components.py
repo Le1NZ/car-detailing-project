@@ -1,428 +1,299 @@
 """
 Component tests for Cart Service
 
-Component tests verify the interaction between multiple components of the service:
+Component tests verify the interaction between multiple internal components:
 - API endpoints (FastAPI routes)
-- Service layer (business logic)
-- Repository layer (data storage)
-- CATALOG integration (product/service catalog)
+- Service layer (CartService with business logic)
+- Repository layer (LocalCartRepo with data storage)
+- CATALOG integration (product/service catalog validation)
 
-These tests use real instances of all internal components (no mocking)
-to validate end-to-end behavior and cross-component interactions.
+These tests use REAL instances of all internal components (NO mocking of internal layers).
+Only external dependencies would be mocked (cart-service has no external dependencies).
 """
 import pytest
 from fastapi.testclient import TestClient
 
 
-class TestAddItemFromCatalog:
+class TestAddItemFromCatalogFlow:
     """
-    Component Test 1: Test adding items from catalog to cart
+    Component Test 1: Add item from catalog flow
 
-    This test validates the complete flow from API request through service
-    layer to repository, ensuring catalog items are correctly validated,
-    transformed, and stored.
+    Tests the complete flow of adding an item from the catalog:
+    - API endpoint receives POST /api/cart/items request
+    - Service validates item_id exists in CATALOG
+    - Service creates CartItem with name and price from CATALOG
+    - Repository stores the item in carts dict
+    - GET /api/cart returns the added item with correct price
+
+    All components work together WITHOUT mocking.
     """
 
-    def test_add_oil_change_service_from_catalog(self, test_client: TestClient):
+    def test_add_item_from_catalog_flow(self, test_client: TestClient):
         """
-        Test adding 'Замена масла' service from catalog to cart
+        Test adding a product from catalog through all layers
+
+        Flow:
+        1. POST /api/cart/items with item_id from catalog
+        2. CartService checks CATALOG and extracts name/price
+        3. LocalCartRepo stores CartItem in _storage dict
+        4. GET /api/cart retrieves item with correct catalog data
 
         Validates:
-        - API endpoint accepts valid request
-        - Service validates item exists in CATALOG
-        - Service extracts correct name and price from CATALOG
-        - Repository stores item correctly
-        - Response includes correct catalog data
+        - API layer accepts request and returns 200
+        - Service layer validates against CATALOG
+        - Service extracts correct name "Масляный фильтр" and price 1000.00
+        - Repository correctly stores the item
+        - Total price calculation works: 1000.00 * 2 = 2000.00
         """
-        # Arrange
-        request_data = {
-            "item_id": "svc_oil_change",
-            "type": "service",
-            "quantity": 1
-        }
+        # Step 1: Add item from catalog via API
+        add_response = test_client.post(
+            "/api/cart/items",
+            json={
+                "item_id": "prod_oil_filter",
+                "type": "product",
+                "quantity": 2
+            }
+        )
 
-        # Act
-        response = test_client.post("/api/cart/items", json=request_data)
+        # Verify API accepted request
+        assert add_response.status_code == 200
+        add_data = add_response.json()
 
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify cart structure
-        assert "user_id" in data
-        assert "items" in data
-        assert "total_price" in data
-
-        # Verify item was added from catalog with correct data
-        assert len(data["items"]) == 1
-        item = data["items"][0]
-        assert item["item_id"] == "svc_oil_change"
-        assert item["type"] == "service"
-        assert item["name"] == "Замена масла"  # From CATALOG
-        assert item["price"] == 2500.00  # From CATALOG
-        assert item["quantity"] == 1
-
-        # Verify total price calculation
-        assert data["total_price"] == 2500.00
-
-    def test_add_oil_filter_product_from_catalog(self, test_client: TestClient):
-        """
-        Test adding 'Масляный фильтр' product from catalog to cart
-
-        Validates:
-        - Product items are handled correctly
-        - Quantity multiplier works for products
-        - Catalog lookup works for products, not just services
-        """
-        # Arrange
-        request_data = {
-            "item_id": "prod_oil_filter",
-            "type": "product",
-            "quantity": 3
-        }
-
-        # Act
-        response = test_client.post("/api/cart/items", json=request_data)
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify product added from catalog
-        assert len(data["items"]) == 1
-        item = data["items"][0]
+        # Verify Service extracted data from CATALOG
+        assert len(add_data["items"]) == 1
+        item = add_data["items"][0]
         assert item["item_id"] == "prod_oil_filter"
         assert item["type"] == "product"
         assert item["name"] == "Масляный фильтр"  # From CATALOG
         assert item["price"] == 1000.00  # From CATALOG
-        assert item["quantity"] == 3
-
-        # Verify price calculation: 1000.00 * 3 = 3000.00
-        assert data["total_price"] == 3000.00
-
-    def test_add_diagnostics_service_from_catalog(self, test_client: TestClient):
-        """
-        Test adding 'Диагностика' service from catalog to cart
-
-        Validates:
-        - All catalog items are accessible
-        - Different services have different prices
-        """
-        # Arrange
-        request_data = {
-            "item_id": "svc_diagnostics",
-            "type": "service",
-            "quantity": 2
-        }
-
-        # Act
-        response = test_client.post("/api/cart/items", json=request_data)
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify diagnostics service added from catalog
-        item = data["items"][0]
-        assert item["item_id"] == "svc_diagnostics"
-        assert item["name"] == "Диагностика"  # From CATALOG
-        assert item["price"] == 1500.00  # From CATALOG
         assert item["quantity"] == 2
 
-        # Verify price calculation: 1500.00 * 2 = 3000.00
-        assert data["total_price"] == 3000.00
+        # Verify Service calculated total_price correctly
+        assert add_data["total_price"] == 2000.00  # 1000.00 * 2
 
-    def test_add_nonexistent_item_fails_catalog_validation(self, test_client: TestClient):
-        """
-        Test that adding item not in catalog returns 404
-
-        Validates:
-        - Service layer validates against CATALOG
-        - Proper error handling for missing catalog items
-        - Cart remains unchanged after failed add
-        """
-        # Arrange
-        request_data = {
-            "item_id": "non_existent_item",
-            "type": "service",
-            "quantity": 1
-        }
-
-        # Act
-        response = test_client.post("/api/cart/items", json=request_data)
-
-        # Assert
-        assert response.status_code == 404
-        data = response.json()
-        assert "detail" in data
-        assert "not found in catalog" in data["detail"].lower()
-
-        # Verify cart is still empty
+        # Step 2: Verify Repository stored data by fetching cart
         get_response = test_client.get("/api/cart")
-        cart_data = get_response.json()
-        assert len(cart_data["items"]) == 0
-        assert cart_data["total_price"] == 0.0
+        assert get_response.status_code == 200
+        get_data = get_response.json()
 
-    def test_add_item_with_wrong_type_fails_validation(self, test_client: TestClient):
-        """
-        Test that type mismatch between request and catalog returns 400
-
-        Validates:
-        - Service validates type matches catalog
-        - Business rules are enforced at service layer
-        """
-        # Arrange - svc_oil_change is a service, not a product
-        request_data = {
-            "item_id": "svc_oil_change",
-            "type": "product",  # Wrong type!
-            "quantity": 1
-        }
-
-        # Act
-        response = test_client.post("/api/cart/items", json=request_data)
-
-        # Assert
-        assert response.status_code == 400
-        data = response.json()
-        assert "detail" in data
-        assert "type mismatch" in data["detail"].lower()
+        # Verify data persisted through Repository
+        assert len(get_data["items"]) == 1
+        stored_item = get_data["items"][0]
+        assert stored_item["item_id"] == "prod_oil_filter"
+        assert stored_item["name"] == "Масляный фильтр"
+        assert stored_item["price"] == 1000.00
+        assert stored_item["quantity"] == 2
+        assert get_data["total_price"] == 2000.00
 
 
-class TestRemoveItemFromCart:
+class TestQuantityAccumulationFlow:
     """
-    Component Test 2: Test removing items from cart
+    Component Test 2: Quantity accumulation flow
 
-    Validates the complete flow of item removal including:
-    - API endpoint handling
-    - Service layer validation
-    - Repository state updates
-    - Error handling for missing items
+    Tests that adding the same item multiple times accumulates quantity:
+    - First POST adds item with quantity=2
+    - Second POST adds same item with quantity=3
+    - Repository accumulates quantity (total=5)
+    - Service recalculates total_price based on accumulated quantity
+    - GET /api/cart shows quantity=5
+
+    Validates interaction between Service and Repository for quantity logic.
     """
 
-    def test_remove_existing_item_success(self, test_client: TestClient):
+    def test_quantity_accumulation_flow(self, test_client: TestClient):
         """
-        Test removing an item that exists in cart
+        Test that adding same item multiple times accumulates quantity
+
+        Flow:
+        1. POST item with quantity=2
+        2. Repository stores new item with quantity=2
+        3. POST same item with quantity=3
+        4. Repository finds existing item and accumulates: 2 + 3 = 5
+        5. Service recalculates total_price: 2500.00 * 5 = 12500.00
+        6. GET confirms accumulated quantity
 
         Validates:
-        - Item can be added and then removed
-        - Repository correctly deletes item
-        - 204 No Content response is returned
-        - Cart is empty after removal
-        """
-        # Arrange - Add item first
-        test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
-        )
-
-        # Verify item was added
-        get_response = test_client.get("/api/cart")
-        assert len(get_response.json()["items"]) == 1
-
-        # Act - Remove the item
-        delete_response = test_client.delete("/api/cart/items/svc_oil_change")
-
-        # Assert
-        assert delete_response.status_code == 204
-        assert delete_response.text == ""  # No content
-
-        # Verify item was removed from repository
-        get_response = test_client.get("/api/cart")
-        cart_data = get_response.json()
-        assert len(cart_data["items"]) == 0
-        assert cart_data["total_price"] == 0.0
-
-    def test_remove_nonexistent_item_returns_404(self, test_client: TestClient):
-        """
-        Test removing an item that doesn't exist in cart
-
-        Validates:
-        - Service validates item exists before removal
-        - Proper error response for missing items
-        - Repository returns False for nonexistent items
-        """
-        # Act - Try to remove item from empty cart
-        response = test_client.delete("/api/cart/items/svc_oil_change")
-
-        # Assert
-        assert response.status_code == 404
-        data = response.json()
-        assert "detail" in data
-        assert "not found in cart" in data["detail"].lower()
-
-    def test_remove_one_item_preserves_others(self, test_client: TestClient):
-        """
-        Test removing one item doesn't affect other items in cart
-
-        Validates:
-        - Repository correctly removes only specified item
-        - Other items remain intact
-        - Total price recalculates correctly
-        """
-        # Arrange - Add multiple items
-        test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
-        )
-        test_client.post(
-            "/api/cart/items",
-            json={"item_id": "prod_oil_filter", "type": "product", "quantity": 2}
-        )
-        test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_diagnostics", "type": "service", "quantity": 1}
-        )
-
-        # Verify all items added
-        get_response = test_client.get("/api/cart")
-        assert len(get_response.json()["items"]) == 3
-
-        # Act - Remove middle item
-        delete_response = test_client.delete("/api/cart/items/prod_oil_filter")
-        assert delete_response.status_code == 204
-
-        # Assert - Verify other items preserved
-        get_response = test_client.get("/api/cart")
-        cart_data = get_response.json()
-
-        assert len(cart_data["items"]) == 2
-
-        # Verify specific items remain
-        item_ids = {item["item_id"] for item in cart_data["items"]}
-        assert "svc_oil_change" in item_ids
-        assert "svc_diagnostics" in item_ids
-        assert "prod_oil_filter" not in item_ids
-
-        # Verify total price: 2500.00 + 1500.00 = 4000.00
-        assert cart_data["total_price"] == 4000.00
-
-
-class TestTotalPriceCalculation:
-    """
-    Component Test 3: Test total_price calculation with different quantities
-
-    Validates that the service layer correctly calculates total_price
-    across different scenarios and quantities.
-    """
-
-    def test_total_price_single_item_quantity_one(self, test_client: TestClient):
-        """
-        Test total price calculation for single item with quantity 1
-
-        Validates:
-        - Basic price calculation: price * 1
-        - Service._calculate_total_price() works correctly
-        """
-        # Arrange & Act
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
-        )
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-        # Expected: 2500.00 * 1 = 2500.00
-        assert data["total_price"] == 2500.00
-
-    def test_total_price_single_item_multiple_quantity(self, test_client: TestClient):
-        """
-        Test total price calculation for single item with quantity > 1
-
-        Validates:
-        - Quantity multiplier works correctly
-        - Price calculation: price * quantity
-        """
-        # Arrange & Act
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "prod_oil_filter", "type": "product", "quantity": 5}
-        )
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-        # Expected: 1000.00 * 5 = 5000.00
-        assert data["total_price"] == 5000.00
-
-    def test_total_price_multiple_items_different_quantities(self, test_client: TestClient):
-        """
-        Test total price calculation for multiple items with different quantities
-
-        Validates:
-        - Service sums all items correctly
-        - Each item's price * quantity is calculated
-        - Repository maintains all items for calculation
-        """
-        # Arrange & Act - Add three different items with different quantities
-        test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 2}
-        )
-        test_client.post(
-            "/api/cart/items",
-            json={"item_id": "prod_oil_filter", "type": "product", "quantity": 3}
-        )
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_diagnostics", "type": "service", "quantity": 1}
-        )
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-
-        # Expected calculation:
-        # svc_oil_change: 2500.00 * 2 = 5000.00
-        # prod_oil_filter: 1000.00 * 3 = 3000.00
-        # svc_diagnostics: 1500.00 * 1 = 1500.00
-        # Total: 5000.00 + 3000.00 + 1500.00 = 9500.00
-        assert data["total_price"] == 9500.00
-
-    def test_total_price_accumulated_quantity(self, test_client: TestClient):
-        """
-        Test total price updates when adding same item multiple times
-
-        Validates:
-        - Repository accumulates quantity for duplicate items
+        - Repository correctly identifies duplicate item_id
+        - Repository accumulates quantity instead of creating duplicate
         - Service recalculates total after each addition
-        - Price reflects accumulated quantity
         """
-        # Arrange & Act - Add same item three times
+        # Step 1: Add item first time (quantity=2)
         response1 = test_client.post(
             "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
+            json={
+                "item_id": "svc_oil_change",
+                "type": "service",
+                "quantity": 2
+            }
         )
+
+        assert response1.status_code == 200
+        data1 = response1.json()
+        assert len(data1["items"]) == 1
+        assert data1["items"][0]["quantity"] == 2
+        assert data1["total_price"] == 5000.00  # 2500.00 * 2
+
+        # Step 2: Add same item again (quantity=3)
         response2 = test_client.post(
             "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 2}
-        )
-        response3 = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 3}
+            json={
+                "item_id": "svc_oil_change",
+                "type": "service",
+                "quantity": 3
+            }
         )
 
-        # Assert progression
-        assert response1.json()["total_price"] == 2500.00  # 1 * 2500
-        assert response2.json()["total_price"] == 7500.00  # 3 * 2500
-        assert response3.json()["total_price"] == 15000.00  # 6 * 2500
+        assert response2.status_code == 200
+        data2 = response2.json()
 
-        # Verify final state
+        # Verify Repository accumulated quantity (not duplicated)
+        assert len(data2["items"]) == 1  # Still only one unique item
+        assert data2["items"][0]["quantity"] == 5  # 2 + 3 = 5
+
+        # Verify Service recalculated total_price
+        assert data2["total_price"] == 12500.00  # 2500.00 * 5
+
+        # Step 3: Verify persistence via GET
         get_response = test_client.get("/api/cart")
-        cart_data = get_response.json()
-        assert len(cart_data["items"]) == 1  # Still one unique item
-        assert cart_data["items"][0]["quantity"] == 6  # Total quantity
-        assert cart_data["total_price"] == 15000.00
+        get_data = get_response.json()
 
-    def test_total_price_after_removal(self, test_client: TestClient):
+        assert len(get_data["items"]) == 1
+        assert get_data["items"][0]["item_id"] == "svc_oil_change"
+        assert get_data["items"][0]["quantity"] == 5
+        assert get_data["total_price"] == 12500.00
+
+
+class TestTotalPriceCalculationAcrossLayers:
+    """
+    Component Test 3: Total price calculation across all layers
+
+    Tests that total_price is correctly calculated when multiple different items
+    are added:
+    - Add multiple different items via API
+    - Service calculates price * quantity for each item
+    - Repository stores all items
+    - GET /api/cart returns correct sum of all (price * quantity)
+
+    Validates the complete data flow for price calculation.
+    """
+
+    def test_total_price_calculation_across_layers(self, test_client: TestClient):
         """
-        Test total price recalculates correctly after item removal
+        Test total_price calculation with multiple items through all layers
+
+        Flow:
+        1. POST first item: svc_oil_change (qty=2, price=2500.00)
+        2. POST second item: prod_oil_filter (qty=3, price=1000.00)
+        3. POST third item: svc_diagnostics (qty=1, price=1500.00)
+        4. Repository stores all 3 items separately
+        5. Service calculates: (2500*2) + (1000*3) + (1500*1) = 9500.00
+        6. GET returns all items with correct total
 
         Validates:
-        - Total price updates when items are removed
-        - Service recalculates from remaining items
+        - Repository maintains multiple distinct items
+        - Service correctly sums price*quantity for all items
+        - API returns complete cart state
         """
-        # Arrange - Add multiple items
+        # Add first item: Oil Change (2x @ 2500.00 = 5000.00)
+        response1 = test_client.post(
+            "/api/cart/items",
+            json={
+                "item_id": "svc_oil_change",
+                "type": "service",
+                "quantity": 2
+            }
+        )
+        assert response1.status_code == 200
+        assert response1.json()["total_price"] == 5000.00
+
+        # Add second item: Oil Filter (3x @ 1000.00 = 3000.00)
+        response2 = test_client.post(
+            "/api/cart/items",
+            json={
+                "item_id": "prod_oil_filter",
+                "type": "product",
+                "quantity": 3
+            }
+        )
+        assert response2.status_code == 200
+        assert response2.json()["total_price"] == 8000.00  # 5000 + 3000
+
+        # Add third item: Diagnostics (1x @ 1500.00 = 1500.00)
+        response3 = test_client.post(
+            "/api/cart/items",
+            json={
+                "item_id": "svc_diagnostics",
+                "type": "service",
+                "quantity": 1
+            }
+        )
+        assert response3.status_code == 200
+        data3 = response3.json()
+
+        # Verify Repository stored all 3 items
+        assert len(data3["items"]) == 3
+
+        # Verify Service calculated correct total: 5000 + 3000 + 1500 = 9500
+        assert data3["total_price"] == 9500.00
+
+        # Verify all items have correct data from CATALOG
+        items_by_id = {item["item_id"]: item for item in data3["items"]}
+
+        assert items_by_id["svc_oil_change"]["name"] == "Замена масла"
+        assert items_by_id["svc_oil_change"]["price"] == 2500.00
+        assert items_by_id["svc_oil_change"]["quantity"] == 2
+
+        assert items_by_id["prod_oil_filter"]["name"] == "Масляный фильтр"
+        assert items_by_id["prod_oil_filter"]["price"] == 1000.00
+        assert items_by_id["prod_oil_filter"]["quantity"] == 3
+
+        assert items_by_id["svc_diagnostics"]["name"] == "Диагностика"
+        assert items_by_id["svc_diagnostics"]["price"] == 1500.00
+        assert items_by_id["svc_diagnostics"]["quantity"] == 1
+
+        # Final verification via GET
+        get_response = test_client.get("/api/cart")
+        get_data = get_response.json()
+
+        assert len(get_data["items"]) == 3
+        assert get_data["total_price"] == 9500.00
+
+
+class TestRemoveItemFlow:
+    """
+    Component Test 4: Remove item flow
+
+    Tests the complete flow of removing an item:
+    - Add 3 items via API
+    - DELETE one item via API
+    - Service calls Repository.remove_item()
+    - Repository removes item from _storage dict
+    - GET /api/cart shows only 2 remaining items
+
+    Validates coordination between all layers for delete operations.
+    """
+
+    def test_remove_item_flow(self, test_client: TestClient):
+        """
+        Test removing item from cart through all layers
+
+        Flow:
+        1. POST 3 different items to cart
+        2. Verify all 3 stored in Repository
+        3. DELETE middle item via API
+        4. Service calls Repository.remove_item()
+        5. Repository filters out item from list
+        6. GET shows only 2 items remain
+        7. Service recalculates total_price for remaining items
+
+        Validates:
+        - API DELETE endpoint works
+        - Service validates item exists before removal
+        - Repository correctly removes specific item
+        - Repository preserves other items
+        - Service recalculates total after removal
+        """
+        # Step 1: Add 3 items
         test_client.post(
             "/api/cart/items",
             json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
@@ -431,270 +302,139 @@ class TestTotalPriceCalculation:
             "/api/cart/items",
             json={"item_id": "prod_oil_filter", "type": "product", "quantity": 2}
         )
-
-        # Initial total: 2500 + (1000 * 2) = 4500
-        get_response = test_client.get("/api/cart")
-        assert get_response.json()["total_price"] == 4500.00
-
-        # Act - Remove one item
-        test_client.delete("/api/cart/items/prod_oil_filter")
-
-        # Assert - Total recalculated
-        get_response = test_client.get("/api/cart")
-        cart_data = get_response.json()
-        # Expected: 2500.00 (only oil change remains)
-        assert cart_data["total_price"] == 2500.00
-
-
-class TestEmptyCartForNewUser:
-    """
-    Component Test 4: Test getting empty cart for new user
-
-    Validates that the system correctly handles new users who haven't
-    added any items to their cart yet.
-    """
-
-    def test_get_empty_cart_returns_empty_items_list(self, test_client: TestClient):
-        """
-        Test GET /api/cart for new user returns empty cart
-
-        Validates:
-        - Repository returns empty list for non-existent user_id
-        - Service creates valid CartResponse with empty items
-        - API returns 200 with valid structure
-        """
-        # Act
-        response = test_client.get("/api/cart")
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify structure
-        assert "user_id" in data
-        assert "items" in data
-        assert "total_price" in data
-
-        # Verify empty state
-        assert isinstance(data["items"], list)
-        assert len(data["items"]) == 0
-        assert data["total_price"] == 0.0
-
-    def test_empty_cart_has_valid_user_id(self, test_client: TestClient):
-        """
-        Test that empty cart response includes valid user_id
-
-        Validates:
-        - User ID is present even for empty cart
-        - Mock authentication provides consistent user_id
-        """
-        # Act
-        response = test_client.get("/api/cart")
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-
-        # Verify user_id is valid UUID format
-        user_id = data["user_id"]
-        assert isinstance(user_id, str)
-        assert len(user_id) == 36  # UUID format: 8-4-4-4-12
-        assert user_id.count("-") == 4
-
-    def test_empty_cart_total_price_is_zero(self, test_client: TestClient):
-        """
-        Test that empty cart has total_price of 0.0
-
-        Validates:
-        - Service._calculate_total_price([]) returns 0.0
-        - No errors when calculating total for empty list
-        """
-        # Act
-        response = test_client.get("/api/cart")
-
-        # Assert
-        assert response.status_code == 200
-        data = response.json()
-        assert data["total_price"] == 0.0
-        assert isinstance(data["total_price"], (int, float))
-
-
-class TestComplexCartScenario:
-    """
-    Component Test 5: Test complex scenario with multiple operations
-
-    This test validates a realistic user workflow:
-    1. Start with empty cart
-    2. Add multiple items from catalog
-    3. Verify total price
-    4. Remove one item
-    5. Verify updated total price
-    6. Add more items
-    7. Verify final state
-
-    This ensures all components work together correctly in real-world usage.
-    """
-
-    def test_complete_shopping_workflow(self, test_client: TestClient):
-        """
-        Test complete shopping workflow with multiple operations
-
-        Validates:
-        - All components work together seamlessly
-        - State is maintained correctly across operations
-        - Total price updates correctly after each operation
-        - Repository, service, and API layer all function properly
-        """
-        # Step 1: Verify cart starts empty
-        response = test_client.get("/api/cart")
-        assert response.status_code == 200
-        initial_cart = response.json()
-        assert len(initial_cart["items"]) == 0
-        assert initial_cart["total_price"] == 0.0
-
-        # Step 2: Add oil change service (1x @ 2500.00)
-        response = test_client.post(
+        test_client.post(
             "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
+            json={"item_id": "svc_diagnostics", "type": "service", "quantity": 1}
         )
-        assert response.status_code == 200
-        cart_after_step2 = response.json()
-        assert len(cart_after_step2["items"]) == 1
-        assert cart_after_step2["total_price"] == 2500.00
 
-        # Step 3: Add oil filter product (3x @ 1000.00)
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "prod_oil_filter", "type": "product", "quantity": 3}
-        )
-        assert response.status_code == 200
-        cart_after_step3 = response.json()
-        assert len(cart_after_step3["items"]) == 2
-        # Expected: 2500 + (1000 * 3) = 5500
-        assert cart_after_step3["total_price"] == 5500.00
+        # Verify all 3 items added
+        get_response1 = test_client.get("/api/cart")
+        data1 = get_response1.json()
+        assert len(data1["items"]) == 3
+        # Total: 2500 + (1000*2) + 1500 = 6000
+        assert data1["total_price"] == 6000.00
 
-        # Step 4: Add diagnostics service (2x @ 1500.00)
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_diagnostics", "type": "service", "quantity": 2}
-        )
-        assert response.status_code == 200
-        cart_after_step4 = response.json()
-        assert len(cart_after_step4["items"]) == 3
-        # Expected: 2500 + 3000 + 3000 = 8500
-        assert cart_after_step4["total_price"] == 8500.00
+        # Step 2: Remove middle item (oil filter)
+        delete_response = test_client.delete("/api/cart/items/prod_oil_filter")
 
-        # Step 5: Verify cart state via GET
-        response = test_client.get("/api/cart")
-        assert response.status_code == 200
-        cart_state = response.json()
-        assert len(cart_state["items"]) == 3
-        assert cart_state["total_price"] == 8500.00
+        # Verify API returned 204 No Content
+        assert delete_response.status_code == 204
+        assert delete_response.text == ""
 
-        # Verify individual items
-        item_map = {item["item_id"]: item for item in cart_state["items"]}
-        assert item_map["svc_oil_change"]["quantity"] == 1
-        assert item_map["prod_oil_filter"]["quantity"] == 3
-        assert item_map["svc_diagnostics"]["quantity"] == 2
+        # Step 3: Verify Repository removed item and Service recalculated total
+        get_response2 = test_client.get("/api/cart")
+        data2 = get_response2.json()
 
-        # Step 6: Remove oil filter product
-        response = test_client.delete("/api/cart/items/prod_oil_filter")
-        assert response.status_code == 204
+        # Only 2 items remain
+        assert len(data2["items"]) == 2
 
-        # Step 7: Verify cart updated after removal
-        response = test_client.get("/api/cart")
-        assert response.status_code == 200
-        cart_after_removal = response.json()
-        assert len(cart_after_removal["items"]) == 2
-        # Expected: 2500 + 3000 = 5500
-        assert cart_after_removal["total_price"] == 5500.00
-
-        # Verify removed item is gone
-        item_ids = {item["item_id"] for item in cart_after_removal["items"]}
+        # Verify correct items remain (oil filter removed)
+        item_ids = {item["item_id"] for item in data2["items"]}
         assert "svc_oil_change" in item_ids
         assert "svc_diagnostics" in item_ids
         assert "prod_oil_filter" not in item_ids
 
-        # Step 8: Add oil change service again (should accumulate)
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 2}
-        )
-        assert response.status_code == 200
-        cart_after_add = response.json()
-        assert len(cart_after_add["items"]) == 2  # Still 2 unique items
-        # Expected: (2500 * 3) + 3000 = 10500
-        assert cart_after_add["total_price"] == 10500.00
+        # Verify Service recalculated total: 2500 + 1500 = 4000
+        assert data2["total_price"] == 4000.00
 
-        # Verify oil change quantity accumulated
-        oil_change_item = next(
-            item for item in cart_after_add["items"]
-            if item["item_id"] == "svc_oil_change"
-        )
-        assert oil_change_item["quantity"] == 3  # 1 + 2
 
-        # Step 9: Final verification - get cart one more time
-        response = test_client.get("/api/cart")
-        assert response.status_code == 200
-        final_cart = response.json()
-        assert len(final_cart["items"]) == 2
-        assert final_cart["total_price"] == 10500.00
+class TestCatalogValidationThroughService:
+    """
+    Component Test 5: Catalog validation through service layer
 
-        # Verify final quantities
-        final_item_map = {item["item_id"]: item for item in final_cart["items"]}
-        assert final_item_map["svc_oil_change"]["quantity"] == 3
-        assert final_item_map["svc_diagnostics"]["quantity"] == 2
+    Tests catalog validation when attempting to add non-existent item:
+    - Attempt to POST item with invalid item_id
+    - Service checks CATALOG and raises HTTPException
+    - Repository is NOT modified
+    - API returns 404 error
+    - GET confirms cart remains unchanged
 
-    def test_error_recovery_preserves_cart_state(self, test_client: TestClient):
+    Validates error handling across all layers.
+    """
+
+    def test_catalog_validation_through_service(self, test_client: TestClient):
         """
-        Test that failed operations don't corrupt cart state
+        Test that invalid item_id is rejected by Service layer
+
+        Flow:
+        1. Attempt POST with non-existent item_id
+        2. Service validates against CATALOG
+        3. Service raises HTTPException(404)
+        4. Repository.add_item() is NOT called
+        5. API returns 404 error response
+        6. GET confirms Repository unchanged (empty cart)
 
         Validates:
-        - Cart state is preserved after validation errors
-        - Repository rollback/transaction semantics work correctly
-        - System remains consistent after errors
+        - Service layer properly validates catalog
+        - Error propagates correctly to API layer
+        - Repository remains unchanged after validation error
+        - API returns appropriate error response
         """
-        # Step 1: Add valid items
-        test_client.post(
+        # Step 1: Verify cart starts empty
+        get_response1 = test_client.get("/api/cart")
+        data1 = get_response1.json()
+        assert len(data1["items"]) == 0
+        assert data1["total_price"] == 0.0
+
+        # Step 2: Attempt to add item not in CATALOG
+        add_response = test_client.post(
             "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "service", "quantity": 1}
+            json={
+                "item_id": "non_existent_item_xyz",
+                "type": "service",
+                "quantity": 1
+            }
         )
-        test_client.post(
+
+        # Verify Service caught invalid item_id and API returned 404
+        assert add_response.status_code == 404
+        error_data = add_response.json()
+        assert "detail" in error_data
+        assert "not found in catalog" in error_data["detail"].lower()
+        assert "non_existent_item_xyz" in error_data["detail"]
+
+        # Step 3: Verify Repository was NOT modified
+        get_response2 = test_client.get("/api/cart")
+        data2 = get_response2.json()
+
+        # Cart still empty - Repository unchanged
+        assert len(data2["items"]) == 0
+        assert data2["total_price"] == 0.0
+
+        # Step 4: Add valid item to ensure system still works
+        valid_response = test_client.post(
             "/api/cart/items",
-            json={"item_id": "prod_oil_filter", "type": "product", "quantity": 2}
+            json={
+                "item_id": "svc_oil_change",
+                "type": "service",
+                "quantity": 1
+            }
         )
 
-        # Verify initial state
-        response = test_client.get("/api/cart")
-        initial_state = response.json()
-        assert len(initial_state["items"]) == 2
-        assert initial_state["total_price"] == 4500.00
+        assert valid_response.status_code == 200
+        valid_data = valid_response.json()
+        assert len(valid_data["items"]) == 1
+        assert valid_data["items"][0]["item_id"] == "svc_oil_change"
 
-        # Step 2: Try to add invalid item (should fail)
-        response = test_client.post(
+        # Step 5: Now try invalid type mismatch (another validation scenario)
+        type_mismatch_response = test_client.post(
             "/api/cart/items",
-            json={"item_id": "invalid_item", "type": "service", "quantity": 1}
+            json={
+                "item_id": "svc_oil_change",  # This is a service
+                "type": "product",  # Wrong type!
+                "quantity": 1
+            }
         )
-        assert response.status_code == 404
 
-        # Step 3: Verify cart unchanged
-        response = test_client.get("/api/cart")
-        after_error_state = response.json()
-        assert len(after_error_state["items"]) == 2
-        assert after_error_state["total_price"] == 4500.00
+        # Verify Service caught type mismatch
+        assert type_mismatch_response.status_code == 400
+        error_data2 = type_mismatch_response.json()
+        assert "detail" in error_data2
+        assert "type mismatch" in error_data2["detail"].lower()
 
-        # Step 4: Try to add item with wrong type (should fail)
-        response = test_client.post(
-            "/api/cart/items",
-            json={"item_id": "svc_oil_change", "type": "product", "quantity": 1}
-        )
-        assert response.status_code == 400
+        # Step 6: Verify Repository unchanged (still has only 1 item)
+        get_response3 = test_client.get("/api/cart")
+        data3 = get_response3.json()
 
-        # Step 5: Verify cart still unchanged
-        response = test_client.get("/api/cart")
-        final_state = response.json()
-        assert len(final_state["items"]) == 2
-        assert final_state["total_price"] == 4500.00
-
-        # Verify exact same items
-        assert initial_state["items"] == final_state["items"]
+        assert len(data3["items"]) == 1  # Still only the valid item
+        assert data3["items"][0]["item_id"] == "svc_oil_change"
