@@ -1,15 +1,15 @@
-name: CI to DockerHub
+name: CI/CD to DockerHub
 on:
   push:
     branches: [ main ]
     paths:
       - 'car-service/**'
-      - '.github/workflows/ci-dockerhub.yml'
+      - '.github/workflows/ci-cd-docker_hub.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'car-service/**'
-      - '.github/workflows/ci-dockerhub.yml'
+      - '.github/workflows/ci-cd-docker_hub.yml'
 
 permissions:
   contents: read

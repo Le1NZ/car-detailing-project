@@ -1,15 +1,15 @@
-name: CD to Yandex Cloud
+name: CI/CD to Yandex Cloud
 on:
   push:
     branches: [ main ]
     paths:
       - 'bonus-service/**'
-      - '.github/workflows/cd-yandex.yml'
+      - '.github/workflows/ci-cd-yandex_cloud.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'bonus-service/**'
-      - '.github/workflows/cd-yandex.yml'
+      - '.github/workflows/ci-cd-yandex_cloud.yml'
 
 permissions:
   contents: read
