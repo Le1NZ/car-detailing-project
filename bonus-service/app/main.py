@@ -10,6 +10,7 @@ from app.models.bonus import HealthResponse
 from app.services.bonus_service import BonusService
 from app.services.rabbitmq_consumer import RabbitMQConsumer
 from app.repositories.local_bonus_repo import bonus_repository
+from prometheus_fastapi_instrumentator import Instrumentator
 
 # Configure logging
 logging.basicConfig(
@@ -61,6 +62,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+Instrumentator().instrument(app).expose(app)
 
 # Configure CORS
 app.add_middleware(
