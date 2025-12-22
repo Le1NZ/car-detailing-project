@@ -1,0 +1,51 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'car-detailing'
+    environment: 'development'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'user-service'
+    static_configs:
+      - targets: ['user-service:8001']
+    metrics_path: '/metrics'
+
+  - job_name: 'car-service'
+    static_configs:
+      - targets: ['car-service:8002']
+    metrics_path: '/metrics'
+
+  - job_name: 'order-service'
+    static_configs:
+      - targets: ['order-service:8003']
+    metrics_path: '/metrics'
+
+  - job_name: 'cart-service'
+    static_configs:
+      - targets: ['cart-service:8004']
+    metrics_path: '/metrics'
+
+  - job_name: 'payment-service'
+    static_configs:
+      - targets: ['payment-service:8005']
+    metrics_path: '/metrics'
+
+  - job_name: 'bonus-service'
+    static_configs:
+      - targets: ['bonus-service:8006']
+    metrics_path: '/metrics'
+
+  - job_name: 'fines-service'
+    static_configs:
+      - targets: ['fines-service:8007']
+    metrics_path: '/metrics'
+
+  - job_name: 'support-service'
+    static_configs:
+      - targets: ['support-service:8008']
+    metrics_path: '/metrics'

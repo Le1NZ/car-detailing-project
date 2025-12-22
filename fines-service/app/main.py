@@ -13,6 +13,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
 
 # Include routers
 app.include_router(fines.router)

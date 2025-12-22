@@ -26,6 +26,9 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,

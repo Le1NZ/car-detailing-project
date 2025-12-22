@@ -41,6 +41,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app)
+
 # Include routers
 app.include_router(cars.router, prefix=settings.api_prefix)
 
